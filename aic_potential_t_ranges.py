@@ -15,16 +15,19 @@ else:
         smearing = int(f.readline())
         rmax = int(f.readline())
 
+print(f"Start with ENSEMBLE={ENSEMBLE}, smearing={smearing}, rmax={rmax}")
+
 match = re.search(r"t(\d+)", ENSEMBLE)
 n_tot = int(match.group(1))
 
 ensemble = f"{ENSEMBLE}_sm{smearing}_rmax{rmax:02d}"
 base_dir = os.path.expanduser(f"~/data/analysis/{ensemble}/results_{ensemble}")
+print(f"Working in base_dir={base_dir}")
 
 input_dir = f"{base_dir}/final_energies_clean"
 weights_dir = f"{base_dir}/aic_weights_potential_t"
-mean_dir = f"{base_dir}/mean"
-best_model_dir = f"{base_dir}/best_model"
+mean_dir = f"{base_dir}/mean_potential"
+best_model_dir = f"{base_dir}/best_model_potential"
 
 os.makedirs(weights_dir, exist_ok=True)
 os.makedirs(mean_dir, exist_ok=True)
@@ -40,6 +43,7 @@ for f in glob.glob(f"{best_model_dir}/best_model_r*.dat"):
 
 
 for filepath in glob.glob(f"{input_dir}/*.dat"):
+    print(f"Reading file: {filepath}")
     radius = re.search(r"r\d+", filepath).group()
     parts = os.path.splitext(os.path.basename(filepath))[0].split('_')
     t0, t1 = parts[-4], parts[-3]
@@ -56,21 +60,26 @@ for filepath in glob.glob(f"{input_dir}/*.dat"):
         bias = float(lines[5]) 
         chi2 = float(lines[6])
 
+    print(f"→ n={n}, k={k}, V={V}, err={err}, bias={bias}, chi2={chi2}")
+
     aic = chi2 + 2 * k + 2 * (n_tot - n)
     weight = math.exp(-aic / 2)
 
-    header = f"{'#':<4} {'ita':>4} {'itb':>5} {'weight':>12} {'V':>10} {'error':>10} {'bias':>10} {'chi2':>10} {'n':>4} {'k':>4} {'ntot':>6}\n"
-    line = f"{'':<4} {ita:>4} {itb:>5} {weight:12.10f} {V:10.6f} {err:10.6f} {bias:10.6f} {chi2:10.6f} {n:4} {k:4} {n_tot:6}\n"
+    header = f"{'#':<4} {'t0':>3} {'t1':>3} {'ita':>4} {'itb':>5} {'weight':>12} {'V':>10} {'error':>10} {'bias':>10} {'chi2':>10} {'n':>4} {'k':>4} {'ntot':>6}\n"
+    line = f"{'':<4} {t0:>3} {t1:>3} {ita:>4} {itb:>5} {weight:12.10f} {V:10.6f} {err:10.6f} {bias:10.6f} {chi2:10.6f} {n:4} {k:4} {n_tot:6}\n"
 
+    print(f"Writing weights to {output_path}")
     if not os.path.isfile(output_path):
         with open(output_path, "w") as f:
             f.write(header)
 
     with open(output_path, "a") as f:
         f.write(line)
+    
 
 # Globale Mittelwerte und Bestmodelle (über alle Ranges und t0/t1 pro Radius)
 for radius in set(re.search(r"(r\d+)", f).group(1) for f in glob.glob(f"{weights_dir}/weights_r*_*_*_*_*.dat")):
+    print(f"Compute global averages for {radius}")
     all_lines = []
     for file in glob.glob(f"{weights_dir}/weights_{radius}_*.dat"):
         with open(file) as f:
@@ -81,7 +90,7 @@ for radius in set(re.search(r"(r\d+)", f).group(1) for f in glob.glob(f"{weights
 
     for line in all_lines:
         parts = line.strip().split()
-        w_aic, v, s = float(parts[2]), float(parts[3]), float(parts[4])
+        w_aic, v, s = float(parts[4]), float(parts[5]), float(parts[6])
         if s == 0 or w_aic == 0:
             continue
         v_values.append(v)
@@ -97,6 +106,7 @@ for radius in set(re.search(r"(r\d+)", f).group(1) for f in glob.glob(f"{weights
         aic_weights = [w / total_w_aic for w in aic_weights]
         # Kontrolle Normierung
         total_check = sum(aic_weights)
+        print(f"{radius}: {len(v_values)} values, sum_weights={total_check}")
         # Mittelwert mit normierten AIC-Gewichten
         mean = sum(w * v for w, v in zip(aic_weights, v_values))      
         # statistischer Fehler
@@ -116,10 +126,11 @@ for radius in set(re.search(r"(r\d+)", f).group(1) for f in glob.glob(f"{weights
     min_aic, best_line = None, ""
     for line in all_lines:
         parts = line.split()
-        chi2, n, k = float(parts[6]), int(parts[7]), int(parts[8])
+        chi2, n, k = float(parts[8]), int(parts[9]), int(parts[10])
         aic = chi2 + 2 * k + 2 * (n_tot - n)
         if min_aic is None or aic < min_aic:
             min_aic, best_line = aic, line
+    print(f"Best model for {radius}: min_aic={min_aic}")
 
     out_path = f"{best_model_dir}/best_model_{radius}.dat"
     with open(out_path, "w") as f:
