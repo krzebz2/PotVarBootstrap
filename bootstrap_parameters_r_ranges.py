@@ -93,6 +93,13 @@ def chi2_fn(params, r, V, err):
     err_scaled = err * scale
     return np.sum(((V_data - V_model) / err_scaled) ** 2)
 
+def sample_positive(mu, sigma, n):
+    samples = []
+    while len(samples) < n:
+        new = np.random.normal(mu, sigma, n)
+        samples.extend([x for x in new if x > 0])
+    return np.array(samples[:n])
+
 def run_bootstrap(ira, irb, use_bounds=True):
 
     # Lists for input data (r values and potentials)
@@ -160,7 +167,8 @@ def run_bootstrap(ira, irb, use_bounds=True):
         raise ValueError("No input values found. Check input_dir and ira–irb.")
 
     for r_val, mean, err in zip(r_vals, means, errors):
-        print(f"r{r_val:02d}: mean = {mean:.6f}, error = {err:.6f}")
+        if debug:
+            print(f"r{r_val:02d}: mean = {mean:.6f}, error = {err:.6f}")
 
     # === Bootstrap with Gaussian sampling ===
 
@@ -173,11 +181,12 @@ def run_bootstrap(ira, irb, use_bounds=True):
         bounds = (-np.inf, np.inf)
 
     # === Perform null-sample fit ===
-    try:
-        methods = ["trf", "dogbox"]
-        results = {}
+    
+    methods = ["trf", "dogbox"]
+    results = {}
 
-        for m in methods:
+    for m in methods:
+        try:
             res0 = least_squares(
                 fun=residuals_fn,
                 x0=x0,
@@ -186,26 +195,29 @@ def run_bootstrap(ira, irb, use_bounds=True):
                 xtol=1e-8,
                 bounds=bounds
             )
-            if res0.success:
-                results[m] = res0.x
-            else:
-                results[m] = None
+        except Exception as e:
+                if debug:
+                    print("Error during null-sample fit:", e)
+                exit()
+        if res0.success:
+            results[m] = res0.x
+        else:
+            results[m] = None
 
-        if all(results[m] is not None for m in methods):
-            base = results["trf"]
-            diffs = {m: np.array(results[m]) - base for m in methods}
-            null_fit_results.append((ira, irb, results, diffs))
-
-        V0_null, alpha_null, sigma_null = res0.x
-    except Exception as e:
-        print("Error during null-sample fit:", e)
-        exit()
+    if all(results[m] is not None for m in methods):
+        base = results["trf"]
+        diffs = {m: np.array(results[m]) - base for m in methods}
+        null_fit_results.append((ira, irb, results, diffs))
 
     # Central fit parameters from the initial null fit
     V0_null, alpha_null, sigma_null = res0.x
 
+    # Pre-sample t0 and w0 values (positive only)
+    t0_samples = sample_positive(t0_val, t0_err, n_bootstrap)
+    w0_samples = sample_positive(w0_val, w0_err, n_bootstrap)
+
     # === Run bootstrap resampling === 
-    for _ in range(n_bootstrap):
+    for i in range(n_bootstrap):
         V_sample = normal(loc=means, scale=errors)
 
         try:
@@ -224,93 +236,96 @@ def run_bootstrap(ira, irb, use_bounds=True):
                 xtol=1e-8,
                 bounds=bounds
             )
-
-            if not res.success or np.array_equal(res.x, x0):
-                if debug:
-                    reason = res.message if not res.success else "Initial guess returned, fit ignored"
-                    print("Fit skipped:", reason)
-                continue
-
-            # Erfolgreicher Fit
-            n_fits_ok += 1
-            # if debug:
-            #     print("Fit ok → popt:", res.x)
-                
-            popt = res.x
-            # chi2 = chi2_fn(popt, r_vals, V_sample, errors)
-            # ndf = len(r_vals) - 3
-            # if chi2 / ndf < 2.0:
-            #     n_fits_chi2_pass += 1
-            # else:
-            #     continue
-
-            params.append(popt)
-            V0, alpha, sigma = popt
-            if (c + alpha) / sigma <= 0:
-                reason = []
-                if sigma <= 0:
-                    reason.append("sigma ≤ 0")
-                if c + alpha <= 0:
-                    reason.append("c + alpha ≤ 0")
-                print(f"Invalid r0 → alpha: {alpha:.4f}, sigma: {sigma:.4f} | Reason: {', '.join(reason)}")
-                continue
-
-            # === Compute and store derived bootstrap quantities ===
-
-            # Derived quantities from fitted parameters
-            r0_sample = np.sqrt((c + alpha) / sigma)
-            r0sig_sample = r0_sample * np.sqrt(sigma)
-            inv_r0sq_sample = 1 / r0_sample**2
-            V_r0_sample = cornell_potential(r0_sample, *popt)
-
-            # Derived quantities from t0 and w0
-            t0_sample = normal(loc=t0_val, scale=t0_err)
-            w0_sample = normal(loc=w0_val, scale=w0_err)
-            if t0_sample <= 0 or w0_sample <= 0:
-                n_skipped_t0w0 += 1
-                continue
-
-            sqrt8t0 = math.sqrt(8 * t0_sample)
-            sqrt8w0 = math.sqrt(8) * w0_sample
-
-            sqrt8t0_sig_sample = sqrt8t0 * np.sqrt(sigma)
-            sqrt8w0_sig_sample = sqrt8w0 * np.sqrt(sigma)
-
-            inv_sqrt8t0_sq_sample = 1 / (sqrt8t0 ** 2)         
-            inv_sqrt8w0_sq_sample = 1 / (sqrt8w0 ** 2)
-                       
-            # Chi² and rescaled coordinates
-            chi2 = chi2_fn(popt, r_vals, V_sample, errors)
-            ndf = len(r_vals) - len(popt)
-            
-
-            r_over_r0_sample = [r / r0_sample for r in r_vals]
-            scaled_potential_sample = [r0_sample * (V - V_r0_sample) for V in V_sample]
-
-            # r_over_r0_sample = []
-            # scaled_potential_sample = []
-
-            # for r_val, V_val in zip(r_vals, V_sample):
-            #     r_over_r0_sample.append(r_val / r0_sample)
-            #     scaled_potential_sample.append(r0_sample * (V_val - V_r0_sample))
-
-            # Store bootstrap from fitted parameters 
-            r0_samples.append(r0_sample)
-            r0sig_samples.append(r0sig_sample)
-            inv_r0sq_samples.append(inv_r0sq_sample)
-            chi2_samples.append(chi2)
-            ndf_samples.append(ndf)
-            r_over_r0_samples.append(r_over_r0_sample)
-            scaled_potential_samples.append(scaled_potential_sample)
-
-            # Store bootstrap from t0 and w0 
-            inv_sqrt8t0_sq_samples.append(inv_sqrt8t0_sq_sample)
-            sqrt8t0_sig_samples.append(sqrt8t0_sig_sample)
-            inv_sqrt8w0_sq_samples.append(inv_sqrt8w0_sq_sample)
-            sqrt8w0_sig_samples.append(sqrt8w0_sig_sample)
-
-        except:
+        except Exception as e:
+            if debug:
+                print("Bootstrap fit error:", e)
             continue
+
+        if not res.success or np.array_equal(res.x, x0):
+            if debug:
+                reason = res.message if not res.success else "Initial guess returned, fit ignored"
+                print("Fit skipped:", reason)
+            continue
+
+        # Erfolgreicher Fit
+        n_fits_ok += 1
+        # if debug:
+        #     print("Fit ok → popt:", res.x)
+            
+        popt = res.x
+        # chi2 = chi2_fn(popt, r_vals, V_sample, errors)
+        # ndf = len(r_vals) - 3
+        # if chi2 / ndf < 2.0:
+        #     n_fits_chi2_pass += 1
+        # else:
+        #     continue
+
+        V0, alpha, sigma = popt
+        if sigma <= 0:
+            if debug:
+                print(f"Invalid r0 → sigma ≤ 0 | sigma = {sigma:.4f}")
+            continue
+
+        if (c + alpha) < 0:
+            if debug:
+                print(f"Invalid r0 → c + alpha ≤ 0 | alpha = {alpha:.4f}")
+            continue
+
+        params.append(popt)
+        # === Compute and store derived bootstrap quantities ===
+
+        # Derived quantities from fitted parameters
+        r0_sample = np.sqrt((c + alpha) / sigma)
+        r0sig_sample = r0_sample * np.sqrt(sigma)
+        inv_r0sq_sample = 1 / r0_sample**2
+        V_r0_sample = cornell_potential(r0_sample, *popt)
+
+        # Derived quantities from t0 and w0
+        t0_sample = t0_samples[i]
+        w0_sample = w0_samples[i]
+
+        if t0_sample <= 0 or w0_sample <= 0:
+            n_skipped_t0w0 += 1
+            continue
+
+        sqrt8t0 = math.sqrt(8 * t0_sample)
+        sqrt8w0 = math.sqrt(8) * w0_sample
+
+        sqrt8t0_sig_sample = sqrt8t0 * np.sqrt(sigma)
+        sqrt8w0_sig_sample = sqrt8w0 * np.sqrt(sigma)
+
+        inv_sqrt8t0_sq_sample = 1 / (sqrt8t0 ** 2)         
+        inv_sqrt8w0_sq_sample = 1 / (sqrt8w0 ** 2)
+                    
+        # Chi² and rescaled coordinates
+        chi2 = chi2_fn(popt, r_vals, V_sample, errors)
+        ndf = len(r_vals) - len(popt)
+        
+
+        r_over_r0_sample = [r / r0_sample for r in r_vals]
+        scaled_potential_sample = [r0_sample * (V - V_r0_sample) for V in V_sample]
+
+        # r_over_r0_sample = []
+        # scaled_potential_sample = []
+
+        # for r_val, V_val in zip(r_vals, V_sample):
+        #     r_over_r0_sample.append(r_val / r0_sample)
+        #     scaled_potential_sample.append(r0_sample * (V_val - V_r0_sample))
+
+        # Store bootstrap from fitted parameters 
+        r0_samples.append(r0_sample)
+        r0sig_samples.append(r0sig_sample)
+        inv_r0sq_samples.append(inv_r0sq_sample)
+        chi2_samples.append(chi2)
+        ndf_samples.append(ndf)
+        r_over_r0_samples.append(r_over_r0_sample)
+        scaled_potential_samples.append(scaled_potential_sample)
+
+        # Store bootstrap from t0 and w0 
+        inv_sqrt8t0_sq_samples.append(inv_sqrt8t0_sq_sample)
+        sqrt8t0_sig_samples.append(sqrt8t0_sig_sample)
+        inv_sqrt8w0_sq_samples.append(inv_sqrt8w0_sq_sample)
+        sqrt8w0_sig_samples.append(sqrt8w0_sig_sample)
 
     print(f"Fits successful: {n_fits_ok} out of {n_bootstrap}")
     print(f"Valid r0 values: {len(r0_samples)}")
